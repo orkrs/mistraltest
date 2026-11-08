@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Voxel Paris 1888 — Eiffel Tower Under Construction</title>
+<style>
+  html,body{margin:0;height:100%;background:#14100c;display:flex;align-items:center;justify-content:center}
+  canvas{display:block;box-shadow:0 0 60px rgba(0,0,0,.6)}
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="1280" height="720"></canvas>
+<script type="module">
+import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+/* ================= deterministic core ================= */
+const W = 1280, H = 720, DUR = 14;
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+const rng = mulberry32(1888);
+function hash01(n){const s=Math.sin(n*127.1+311.7)*43758.5453;return s-Math.floor(s);}
+const lerp=(a,b,k)=>a+(b-a)*k;
+const smooth=k=>k*k*(3-2*k);
+const C=h=>new THREE.Color(h);
+const pick=arr=>arr[Math.floor(rng()*arr.length)];
+
+/* ================= renderer / scene ================= */
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setPixelRatio(1);
+renderer.setSize(W, H, false);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.12;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xecc9a0);
+scene.fog = new THREE.Fog(0xecc9a0, 160, 430);           // light haze
+
+const camera = new THREE.PerspectiveCamera(40, W/H, 0.1, 1200);
+
+const hemi = new THREE.HemisphereLight(0xcfd8e8, 0x6f5f4c, 0.75);   // fake AO from below
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xffd2a0, 2.6);             // warm late-afternoon sun
+sun.position.set(-80, 48, 55);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, {left:-85, right:85, top:85, bottom:-85, near:10, far:280});
+sun.shadow.camera.updateProjectionMatrix();
+sun.shadow.bias = -0.0006;
+scene.add(sun);
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(W, H), 0.55, 0.6, 0.78); // soft bloom on sparks
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+/* ================= voxel batches ================= */
+const voxGeo = new RoundedBoxGeometry(1, 1, 1, 2, 0.14);   // rounded voxels
+const _p=new THREE.Vector3(), _s=new THREE.Vector3(), _q=new THREE.Quaternion(), _q0=new THREE.Quaternion(),
+      _m=new THREE.Matrix4(), _d=new THREE.Vector3(), _up=new THREE.Vector3(0,1,0);
+
+class Batch {
+  constructor(mat, cap, dynamic=false, shadow=true){
+    this.mesh = new THREE.InstancedMesh(voxGeo, mat, cap);
+    this.mesh.castShadow = shadow;
+    this.mesh.receiveShadow = shadow;
+    this.mesh.frustumCulled = false;
+    if (dynamic) this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.cap = cap; this.i = 0;
+    scene.add(this.mesh);
+  }
+  clear(){ this.i = 0; }
+  set(x,y,z, sx,sy,sz, q, color){
+    if (this.i >= this.cap) return;
+    _m.compose(_p.set(x,y,z), q||_q0, _s.set(sx,sy,sz));
+    this.mesh.setMatrixAt(this.i, _m);
+    if (color) this.mesh.setColorAt(this.i, color);
+    this.i++;
+  }
+  beam(a, b, th, color){
+    if (this.i >= this.cap) return;
+    _d.subVectors(b, a);
+    const len = _d.length();
+    _q.setFromUnitVectors(_up, _d.normalize());
+    _m.compose(_p.addVectors(a,b).multiplyScalar(0.5), _q, _s.set(th, len, th));
+    this.mesh.setMatrixAt(this.i, _m);
+    if (color) this.mesh.setColorAt(this.i, color);
+    this.i++;
+  }
+  finish(){
+    this.mesh.count = this.i;
+    this.mesh.instanceMatrix.needsUpdate = true;
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+  }
+}
+
+const std = (r=0.9, m=0) => new THREE.MeshStandardMaterial({roughness:r, metalness:m});
+const MAT = {
+  ground: std(1.0), stone: std(0.95), wood: std(0.95), iron: std(0.5, 0.65),
+  cream: std(0.9), zinc: std(0.55, 0.6), glass: std(0.25, 0.5),
+  water: new THREE.MeshStandardMaterial({color:0xffffff, roughness:0.22, metalness:0.55}),
+  spark: new THREE.MeshBasicMaterial({}),
+  smoke: new THREE.MeshBasicMaterial({transparent:true, opacity:0.38, depthWrite:false}),
+};
+
+const B = {
+  ground: new Batch(MAT.ground, 14000),
+  rock:   new Batch(MAT.ground, 32000),
+  stone:  new Batch(MAT.stone, 9000),
+  wood:   new Batch(MAT.wood, 9000),
+  iron:   new Batch(MAT.iron, 6000),
+  cream:  new Batch(MAT.cream, 24000),
+  zinc:   new Batch(MAT.zinc, 5000),
+  glass:  new Batch(MAT.glass, 5000),
+  water:  new Batch(MAT.water, 1200),
+  dark:   new Batch(MAT.wood, 3000),
+};
+const D = {
+  people:   new Batch(MAT.ground, 340, true),
+  heads:    new Batch(MAT.ground, 340, true),
+  hats:     new Batch(MAT.wood, 130, true),
+  parasols: new Batch(MAT.ground, 60, true),
+  arms:     new Batch(MAT.wood, 60, true),
+  boat:     new Batch(MAT.wood, 40, true),
+  cart:     new Batch(MAT.wood, 90, true),
+  carriage: new Batch(MAT.wood, 40, true),
+  crane:    new Batch(MAT.iron, 80, true),
+  spark:    new Batch(MAT.spark, 90, true, false),
+  smoke:    new Batch(MAT.smoke, 60, true, false),
+  pigeon:   new Batch(MAT.wood, 30, true, false),
+};
+
+/* ================= palette ================= */
+const grassCol = () => C(0x77935a).offsetHSL(0, 0, (rng()-0.5)*0.06);
+const dirtCol  = () => C(0x9a7b52).offsetHSL(0, 0, (rng()-0.5)*0.05);
+const stoneCol = C(0x9b958a), quayCol = C(0x8d877c), bridgeCol = C(0xa39a8b);
+const rockShade = y => [C(0x6b5a4a),C(0x5a4c3f),C(0x4a3f35),C(0x3a322b),C(0x2c2620)][Math.min(4, Math.floor(-y/3))];
+const ironCol  = () => C(0x4a2a1e).offsetHSL(0, 0, (rng()-0.5)*0.05);
+const woodCol  = () => C(0x7a5a38).offsetHSL(0, 0, (rng()-0.5)*0.05);
+const zincCol  = () => C(0x6e7480).offsetHSL(0, 0, (rng()-0.5)*0.04);
+const creamCol = () => C(0xe8dcc0).offsetHSL(0, 0, (rng()-0.5)*0.04);
+const waterCol = () => C(0x3f7d9c).offsetHSL(0, 0, (rng()-0.5)*0.03);
+const coatCols = [0x3a3f4a,0x4a3a30,0x50443c,0x5a3a3a,0x3f4a3a,0x2e2e34,0x6b5a44,0x443a52].map(C);
+const skinCols = [0xe8b98a,0xd9a878,0xc99a6a,0xf0c8a0].map(C);
+const greenCol = () => C(0x4e7a3a).offsetHSL((rng()-0.5)*0.03, 0, (rng()-0.5)*0.08);
+
+/* ================= island, river, bridge ================= */
+const IX = 40, IZ = 30;
+const riverZ = x => 24 + 4*Math.sin(x*0.08);
+function inIsland(x,z){
+  if (Math.abs(x) > IX || Math.abs(z) > IZ) return false;
+  const cx = Math.max(0, Math.abs(x)-(IX-7)), cz = Math.max(0, Math.abs(z)-(IZ-7));
+  return cx*cx + cz*cz < 49;
+}
+function buildIsland(){
+  for (let x=-IX; x<=IX; x++) for (let z=-IZ; z<=IZ; z++){
+    if (!inIsland(x,z)) continue;
+    const dz = Math.abs(z - riverZ(x));
+    const depth = 2 + Math.floor(rng()*3) + Math.floor(5*(1-Math.hypot(x/IX, z/IZ))) + Math.floor(rng()*2);
+    if (dz < 3.4){                                   // Seine
+      B.water.set(x, -0.45, z, 1.04, 0.35, 1.04, null, waterCol());
+      for (let y=-1; y>=-depth; y--) B.rock.set(x, y, z, 1, 1, 1, null, rockShade(y));
+      continue;
+    }
+    const inYard = x>=-22 && x<=16 && z>=-30 && z<=16;
+    const isQuay = dz < 4.8;
+    const col = isQuay ? stoneCol : (inYard ? dirtCol() : grassCol());
+    B.ground.set(x, 0, z, 1, 1, 1, null, col);
+    B.ground.set(x, -1, z, 1, 1, 1, null, col.clone().multiplyScalar(0.82));
+    for (let y=-2; y>=-depth; y--) B.rock.set(x, y, z, 1, 1, 1, null, rockShade(y));
+    if (isQuay) B.stone.set(x, 0.7, z, 1, 1.4, 1, null, quayCol);   // stone quays
+  }
+  // arched bridge over the Seine at x=8
+  for (let x=6; x<=10; x++){
+    const zc = riverZ(x);
+    for (let z=Math.floor(zc-6); z<=zc+6; z++){
+      const dz = Math.abs(z-zc);
+      if (dz < 4.2) B.stone.set(x, 1.15, z, 1, 0.5, 1, null, bridgeCol);      // deck
+      if (dz>=4.2 && dz<5.2){ B.stone.set(x, 1.9, z, 1, 1.3, 1, null, bridgeCol); } // parapets
+      if (dz>=3.0 && dz<3.4) B.stone.set(x, 0.3, z, 1, 0.9, 1, null, bridgeCol);   // arch supports
+    }
+  }
+  // open water the island floats above
+  const sea = new THREE.Mesh(new THREE.PlaneGeometry(900, 900), new THREE.MeshStandardMaterial({color:0x35606f, roughness:0.18, metalness:0.6}));
+  sea.rotation.x = -Math.PI/2; sea.position.y = -18; sea.receiveShadow = true;
+  scene.add(sea);
+}
+
+/* ================= Champ de Mars yard ================= */
+function girderStack(x, z){
+  for (let l=0; l<3; l++) for (let i=0; i<5; i++){
+    B.iron.set(x + (i-2)*1.05 + l*0.25, 0.45 + l*0.75, z + (rng()-0.5)*0.4, 0.45, 0.45, 6.5, null, ironCol());
+    B.wood.set(x + (i-2)*1.05, 0.2 + l*0.75, z, 0.5, 0.3, 1.4, null, woodCol());
+  }
+}
+function shed(x, z){
+  const w=6, d=4, h=3.2;
+  for (let wx=0; wx<w; wx++) for (let wy=0; wy<h; wy++){
+    if (wy===1 && wx===2) { B.dark.set(x+wx-w/2+0.5, wy*0.9+0.45, z+d/2+0.55, 1.1, 1.8, 0.2, null, C(0x2a2018)); continue; }
+    B.wood.set(x+wx-w/2+0.5, wy*0.9+0.45, z+d/2+0.5, 1, 0.9, 0.25, null, woodCol());
+    B.wood.set(x+wx-w/2+0.5, wy*0.9+0.45, z-d/2-0.5, 1, 0.9, 0.25, null, woodCol());
+  }
+  for (let wz=0; wz<d; wz++) for (let wy=0; wy<h; wy++){
+    B.wood.set(x-w/2+0.5, wy*0.9+0.45, z+wz-d/2+0.5, 0.25, 0.9, 1, null, woodCol());
+    B.wood.set(x+w/2-0.5, wy*0.9+0.45, z+wz-d/2+0.5, 0.25, 0.9, 1, null, woodCol());
+  }
+  for (let wx=0; wx<w; wx++) for (let i=0; i<3; i++)
+    B.wood.set(x+wx-w/2+0.5, h*0.9 + 0.4 + i*0.45, z + (i-1)*1.1, 1, 0.35, 1.2, null, woodCol());
+}
+let chimneyTop = null;
+function steamEngine(x, z){
+  for (let wx=0; wx<5; wx++) for (let wz=0; wz<3; wz++) B.stone.set(x+wx-2, 0.4, z+wz-1, 1, 0.8, 1, null, stoneCol);
+  B.iron.set(x, 1.7, z, 3.2, 2.2, 2.2, null, ironCol());
+  B.iron.set(x+1.9, 1.7, z, 0.9, 1.6, 2.4, null, ironCol());
+  B.wood.set(x-1.8, 1.7, z, 0.4, 2.6, 2.6, null, woodCol());
+  for (let y=2; y<9; y++) B.dark.set(x+1.6, y*0.9+0.4, z-1.2, 0.85, 0.9, 0.85, null, C(0x33291f));
+  B.dark.set(x+1.6, 8.5, z-1.2, 1.15, 0.5, 1.15, null, C(0x241c14));
+  chimneyTop = new THREE.Vector3(x+1.6, 8.9, z-1.2);
+}
+function buildYard(){
+  girderStack(-14, -18); girderStack(-16.5, -24); girderStack(5, -24); girderStack(9, -27);
+  shed(11, -20); shed(13, -5); shed(-18, -6);
+  steamEngine(-6, 6);
+  for (let i=0; i<3; i++) B.wood.set(-10+i*2.2, 0.4, 12, 2, 0.8, 2, null, woodCol());
+}
+
+/* ================= Haussmann blocks + trees ================= */
+function addBuilding(x, z, w, d, h, side){   // side: 0 = facade faces +z, 1 = faces -x, 2 = faces +x
+  const ry = side===1 ? Math.PI/2 : side===2 ? -Math.PI/2 : 0;
+  const cs = Math.cos(ry), sn = Math.sin(ry);
+  const P = (lx, ly, lz) => [x + lx*cs + lz*sn, ly, z - lx*sn + lz*cs];
+  for (let wx=0; wx<w; wx++) for (let wy=0; wy<h; wy++){
+    let p = P(wx-w/2+0.5, wy+0.5, d/2);  B.cream.set(p[0], p[1], p[2], 1, 1, 0.3, null, creamCol());
+    p = P(wx-w/2+0.5, wy+0.5, -d/2);      B.cream.set(p[0], p[1], p[2], 1, 1, 0.3, null, creamCol());
+    if (wy % 4 === 3){ p = P(wx-w/2+0.5, wy+0.75, d/2); B.cream.set(p[0], p[1], p[2], 1, 0.3, 0.32, null, C(0xcbbd9e)); }
+  }
+  for (let wz=0; wz<d; wz++) for (let wy=0; wy<h; wy++){
+    let p = P(-w/2, wy+0.5, wz-d/2+0.5); B.cream.set(p[0], p[1], p[2], 0.3, 1, 1, null, creamCol());
+    p = P(w-1, wy+0.5, wz-d/2+0.5);      B.cream.set(p[0], p[1], p[2], 0.3, 1, 1, null, creamCol());
+  }
+  for (let wx=0; wx<w; wx+=2) for (let wy=1; wy<h-1; wy+=2){
+    const lit = rng() < 0.12;
+    const gc = lit ? C(0xffd27a) : C(0x2e3d4a);
+    let p = P(wx-w/2+0.5, wy+0.5, d/2+0.18); B.glass.set(p[0], p[1], p[2], 0.8, 1.1, 0.2, null, gc);
+    p = P(wx-w/2+0.5, wy+0.5, -d/2-0.18);      B.glass.set(p[0], p[1], p[2], 0.8, 1.1, 0.2, null, gc);
+  }
+  for (let wx=0; wx<w; wx++){
+    const rh = h + (1 - Math.abs(wx-(w-1)/2)/((w-1)/2))*2.4;
+    for (let wz=0; wz<d; wz++){ const p = P(wx-w/2+0.5, rh, wz-d/2+0.5); B.zinc.set(p[0], p[1], p[2], 1, 1, 1, null, zincCol()); }
+  }
+  const nCh = 1 + Math.floor(rng()*2);
+  for (let i=0; i<nCh; i++){
+    const cx = x + (rng()-0.5)*(w-4)*cs, cz = z + (rng()-0.5)*(d-3);
+    for (let y=0; y<2; y++) B.dark.set(cx, h+2.6+y, cz, 0.7, 1, 0.7, null, C(0x4a4038));
+  }
+}
+function addTree(x, z){
+  B.wood.set(x, 0.8, z, 0.45, 1.6, 0.45, null, woodCol());
+  for (let dx=-1; dx<=1; dx++) for (let dy=0; dy<2; dy++) for (let dz=-1; dz<=1; dz++)
+    if (rng() > 0.15) B.wood.set(x+dx, 1.9+dy, z+dz, 1, 0.95, 1, null, greenCol());
+}
+function buildCity(){
+  for (let x=-38; x<=38; x+=10) addBuilding(x + (rng()-0.5)*2, -33 + (rng()-0.5)*2, 8+Math.floor(rng()*3), 8, 9+Math.floor(rng()*7), 0);
+  for (let z=-28; z<=12; z+=10){ addBuilding(-42, z, 8, 8, 9+Math.floor(rng()*7), 2); addBuilding(42, z, 8, 8, 9+Math.floor(rng()*7), 1); }
+  for (let z=-28; z<=14; z+=10){ addBuilding(-30, z, 8, 8, 8+Math.floor(rng()*6), 2); addBuilding(28, z, 8, 8, 8+Math.floor(rng()*6), 1); }
+  for (let x=-40; x<=40; x+=5){ if (Math.abs(x-8)<4) continue; addTree(x, 17.6); }
+  for (let z=-26; z<=14; z+=6){ addTree(23, z); addTree(-26.5, z); }
+}
+
+/* ================= the tower ================= */
+const TC = new THREE.Vector3(0, 0, -8);
+const TB = 15, H1 = 28, H2 = 50, TOP = 76;
+function legH(stage, u){
+  if (stage===1) return TB - (TB-6)*Math.pow(u, 1.7);
+  if (stage===2) return 6 - (6-3.5)*Math.pow(u, 1.5);
+  return 3.5 - (3.5-0.9)*Math.pow(u, 1.3);
+}
+function legY(stage, u){
+  if (stage===1) return u*H1;
+  if (stage===2) return H1 + u*(H2-H1);
+  return H2 + u*(TOP-H2);
+}
+const legP = (stage, u, sx, sz) => new THREE.Vector3(TC.x + sx*legH(stage,u), legY(stage,u), TC.z + sz*legH(stage,u));
+const sparkPts = [];
+function buildTower(){
+  const corners = [[1,1],[1,-1],[-1,-1],[-1,1]];
+  for (const [sx,sz] of corners)
+    for (let st=1; st<=3; st++){
+      const N = 9;
+      for (let i=0; i<N; i++){
+        const u0=i/N, u1=(i+1)/N;
+        const th = st===1 ? 1.5-0.7*u0 : st===2 ? 0.95-0.35*u0 : 0.6-0.2*u0;
+        B.iron.beam(legP(st,u0,sx,sz), legP(st,u1,sx,sz), th, ironCol());
+        if (st===1 && (i===3 || i===6)) sparkPts.push(legP(st, u1, sx, sz));
+      }
+    }
+  // face bracing with real X-bracing
+  for (const [sa,sb] of [[1,1],[1,-1],[-1,1],[-1,-1]]){
+    const sOther = -sb;
+    for (let c=0; c<6; c++){                        // stage 1: 6 full cells, X braces
+      const u0=c/6, u1=(c+1)/6;
+      const A0=legP(1,u0,sa,sb), A1=legP(1,u1,sa,sb), Bp0=legP(1,u0,sa,sOther), Bp1=legP(1,u1,sa,sOther);
+      B.iron.beam(A1, Bp1, 0.4, ironCol());
+      B.iron.beam(A0, Bp1, 0.3, ironCol());
+      B.iron.beam(Bp0, A1, 0.3, ironCol());
+      if (c===2 || c===4) sparkPts.push(legP(1, u1, sa, sb));
+    }
+    for (let c=0; c<4; c++){                        // stage 2: half built
+      const u0=c/4, u1=(c+1)/4;
+      const A0=legP(2,u0,sa,sb), A1=legP(2,u1,sa,sb), Bp0=legP(2,u0,sa,sOther), Bp1=legP(2,u1,sa,sOther);
+      if (c<2){ B.iron.beam(A1,Bp1,0.35,ironCol()); B.iron.beam(A0,Bp1,0.28,ironCol()); B.iron.beam(Bp0,A1,0.28,ironCol()); }
+      else if (c===2){ const mid=A1.clone().lerp(Bp1,0.5); B.iron.beam(A1,mid,0.3,ironCol()); B.iron.beam(A0,Bp1,0.26,ironCol()); sparkPts.push(A1); }
+    }
+    if (sa===1 && sb===1){                          // top skeleton: a single X high up
+      const A=legP(3,0.55,sa,sb), Bp=legP(3,0.55,sa,-sb), C0=legP(3,0.35,sa,sb), D0=legP(3,0.75,sa,-sb);
+      B.iron.beam(C0, Bp, 0.22, ironCol()); B.iron.beam(D0, A, 0.22, ironCol());
+    }
+  }
+  // first platform: finished deck + railing
+  for (const g of [-6,-3,0,3,6]){
+    B.iron.beam(new THREE.Vector3(TC.x+g,H1,TC.z-6), new THREE.Vector3(TC.x+g,H1,TC.z+6), 0.45, ironCol());
+    B.iron.beam(new THREE.Vector3(TC.x-6,H1,TC.z+g), new THREE.Vector3(TC.x+6,H1,TC.z+g), 0.45, ironCol());
+  }
+  for (const s of [-6,6]) for (let g=-6; g<=6; g+=2){
+    B.iron.set(TC.x+g, H1+0.6, TC.z+s, 0.22, 1.2, 0.22, null, ironCol());
+    B.iron.set(TC.x+s, H1+0.6, TC.z+g, 0.22, 1.2, 0.22, null, ironCol());
+    sparkPts.push(new THREE.Vector3(TC.x+g, H1+0.4, TC.z+s));
+  }
+  B.iron.beam(new THREE.Vector3(TC.x-6,H1+1.2,TC.z-6), new THREE.Vector3(TC.x+6,H1+1.2,TC.z-6), 0.18, ironCol());
+  B.iron.beam(new THREE.Vector3(TC.x-6,H1+1.2,TC.z+6), new THREE.Vector3(TC.x+6,H1+1.2,TC.z+6), 0.18, ironCol());
+  B.iron.beam(new THREE.Vector3(TC.x-6,H1+1.2,TC.z-6), new THREE.Vector3(TC.x-6,H1+1.2,TC.z+6), 0.18, ironCol());
+  B.iron.beam(new THREE.Vector3(TC.x+6,H1+1.2,TC.z-6), new THREE.Vector3(TC.x+6,H1+1.2,TC.z+6), 0.18, ironCol());
+  // second platform: half a deck, partial railing, rising posts
+  for (const g of [0, 1.75, 3.5]){
+    B.iron.beam(new THREE.Vector3(TC.x+g,H2,TC.z-3.5), new THREE.Vector3(TC.x+g,H2,TC.z+3.5), 0.4, ironCol());
+    sparkPts.push(new THREE.Vector3(TC.x+g, H2+0.3, TC.z+3.5));
+  }
+  B.iron.beam(new THREE.Vector3(TC.x,H2,TC.z-3.5), new THREE.Vector3(TC.x+3.5,H2,TC.z-3.5), 0.4, ironCol());
+  for (const s of [-3.5, 3.5]) for (let g=0; g<=3.5; g+=1.75)
+    B.iron.set(TC.x+g, H2+0.6, TC.z+s, 0.2, 1.2, 0.2, null, ironCol());
+  for (const [px,pz] of [[1,-3.5],[3.5,-1],[1,3.5],[3.5,1]]){
+    B.iron.beam(new THREE.Vector3(TC.x+px,H2,TC.z+pz), new THREE.Vector3(TC.x+px,H2+8,TC.z+pz), 0.4, ironCol());
+    sparkPts.push(new THREE.Vector3(TC.x+px, H2+5, TC.z+pz));
+  }
+  B.iron.beam(new THREE.Vector3(TC.x+1,H2+8,TC.z-3.5), new THREE.Vector3(TC.x+3.5,H2+8,TC.z-1), 0.24, ironCol());
+  // summit skeleton
+  B.iron.beam(new THREE.Vector3(TC.x-0.9,H2,TC.z-0.9), new THREE.Vector3(TC.x+0.9,H2,TC.z+0.9), 0.25, ironCol());
+  B.iron.beam(new THREE.Vector3(TC.x,TOP,TC.z), new THREE.Vector3(TC.x,TOP+5,TC.z), 0.35, ironCol());
+}
+
+/* ================= scaffolding + cranes ================= */
+function buildScaffold(x, z){
+  const h = 16;
+  for (const [ox,oz] of [[-2,-2],[2,-2],[-2,2],[2,2]])
+    B.wood.beam(new THREE.Vector3(x+ox,0,z+oz), new THREE.Vector3(x+ox,h,z+oz), 0.45, woodCol());
+  const ring = [[[-2,-2],[2,-2]],[[-2,2],[2,2]],[[-2,-2],[-2,2]],[[2,-2],[2,2]]];
+  for (const y of [4,8,12,16])
+    for (const [a,b] of ring)
+      B.wood.beam(new THREE.Vector3(x+a[0],y,z+a[1]), new THREE.Vector3(x+b[0],y,z+b[1]), 0.32, woodCol());
+  for (const y0 of [0,4,8,12])
+    for (const face of [[-2,-2,2,2],[-2,2,2,-2]]){
+      B.wood.beam(new THREE.Vector3(x+face[0],y0,z+face[1]), new THREE.Vector3(x+face[2],y0+4,z+face[3]), 0.22, woodCol());
+      B.wood.beam(new THREE.Vector3(x+face[2],y0,z+face[3]), new THREE.Vector3(x+face[0],y0+4,z+face[1]), 0.22, woodCol());
+    }
+  for (const gx of [-2,-1,0,1,2]) for (const gz of [-2,-1,0,1,2])
+    B.wood.set(x+gx, h+0.25, z+gz, 1, 0.3, 1, null, woodCol());
+}
+const cranes = [];
+function buildCranes(){
+  const c1 = { top: new THREE.Vector3(TC.x-6, H1+9, TC.z-6), jib: 11, phase: 0 };
+  const c2 = { top: new THREE.Vector3(TC.x+6, H1+9, TC.z+6), jib: 9, phase: 2.1 };
+  for (const c of [c1, c2]){
+    B.iron.beam(new THREE.Vector3(c.top.x, H1, c.top.z), c.top, 0.5, ironCol());
+    B.iron.beam(new THREE.Vector3(c.top.x - Math.cos(0)*3, c.top.y, c.top.z - 3), c.top, 0.35, ironCol());
+    B.iron.set(c.top.x, c.top.y+0.4, c.top.z, 1.2, 0.8, 1.2, null, ironCol());
+    cranes.push(c);
+  }
+  buildScaffold(TC.x+TB+4, TC.z+TB+4); buildScaffold(TC.x+TB+4, TC.z-TB-4);
+  buildScaffold(TC.x-TB-4, TC.z+TB+4); buildScaffold(TC.x-TB-4, TC.z-TB-4);
+}
+
+/* ================= people ================= */
+const people = [];
+const WALK_SEGS = [];
+function addPerson(kind, x, y, z, opts={}){
+  people.push(Object.assign({
+    kind, x, y, z, phase: rng()*Math.PI*2, speed: 0.5+rng()*0.8,
+    coat: pick(coatCols), skin: pick(skinCols),
+    hat: rng()<0.18, parasol: rng()<0.10, topHat: rng()<0.5,
+    parasolCol: pick([C(0xd8b8a0), C(0xc9a0a8), C(0xb8c4cc), C(0xd8cba0)]),
+  }, opts));
+}
+function buildPeople(){
+  for (let i=0; i<240; i++){                       // onlookers: quay + around the yard
+    let x, z;
+    if (rng() < 0.55){ x = -38 + rng()*76; z = 14 + rng()*5.5; }
+    else { const a = rng()*Math.PI*2, r = 18 + rng()*10; x = TC.x + Math.cos(a)*r; z = TC.z + Math.sin(a)*r*0.8; if (z > 14) z = 14 - rng()*4; }
+    addPerson('stand', x, 0, z);
+  }
+  const deckSpots = [[-3,-2],[2,-3],[4,1],[-1,3],[0,0]];
+  for (const [dx,dz] of deckSpots) addPerson('rivet', TC.x+dx, H1, TC.z+dz);
+  for (const [dx,dz] of [[1.5,-2],[2.5,1]]) addPerson('rivet', TC.x+dx, H2, TC.z+dz);
+  addPerson('rivet', TC.x+9.4, legY(1,0.45), TC.z+9.4);
+  addPerson('rivet', TC.x-9.4, legY(1,0.65), TC.z-9.4);
+  for (let i=0; i<8; i++){                         // workers walking along beams
+    const face = i % 4, c = 1 + (i % 4);
+    const sa = [1,1,-1,-1][face], sb = [1,-1,1,-1][face];
+    const u0 = c/6, u1 = (c+1)/6;
+    const a = legP(1, u0, sa, sb), b = legP(1, u1, sa, -sb);
+    WALK_SEGS.push({a, b});
+    addPerson('walk', a.x, a.y, a.z, {seg: WALK_SEGS[WALK_SEGS.length-1]});
+  }
+}
+
+/* ================= dynamic state ================= */
+const cartPath = [new THREE.Vector2(-20,-26), new THREE.Vector2(14,-26), new THREE.Vector2(14,12), new THREE.Vector2(-20,12)];
+function cartState(t, off){
+  const per = cartPath.map((p,i)=>{ const q = cartPath[(i+1)%4]; return {a:p, b:q, len:p.distanceTo(q)}; });
+  const total = per.reduce((s,e)=>s+e.len,0);
+  let d = ((t*2.2 + off*total) % total + total) % total;
+  for (const e of per){ if (d <= e.len){ const k = d/e.len; return { x: lerp(e.a.x,e.b.x,k), z: lerp(e.a.y,e.b.y,k), yaw: Math.atan2(e.b.x-e.a.x, e.b.y-e.a.y) }; } d -= e.len; }
+  return {x:0,z:0,yaw:0};
+}
+function boatState(t){
+  const s = (t/DUR*0.55 + 0.05) % 1;
+  const x = lerp(-36, 36, s);
+  const z = riverZ(x);
+  const dzdx = 4*0.08*Math.cos(x*0.08);
+  return { x, z, yaw: -Math.atan2(dzdx, 1), funnel: new THREE.Vector3(x, 3.6, z) };
+}
+
+function putPerson(batchBody, batchHead, batchHat, batchPar, p, t, idx){
+  let x=p.x, y=p.y, z=p.z, yaw=0;
+  if (p.kind==='stand'){ y += Math.sin(t*1.8+p.phase)*0.05; yaw = Math.sin(p.phase)*0.6; }
+  else if (p.kind==='walk'){
+    const k = 0.5 - 0.5*Math.cos(t*p.speed*2 + p.phase);
+    x = lerp(p.seg.a.x, p.seg.b.x, k); y = lerp(p.seg.a.y, p.seg.b.y, k); z = lerp(p.seg.a.z, p.seg.b.z, k);
+    yaw = Math.atan2(p.seg.b.x-p.seg.a.x, p.seg.b.z-p.seg.a.z);
+    y += Math.abs(Math.sin(t*9+p.phase))*0.12;
+  }
+  else if (p.kind==='rivet'){ y += Math.sin(t*5+p.phase)*0.03; yaw = p.phase; }
+  const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, yaw, 0));
+  batchBody.set(x, y+0.85, z, 0.72, 1.6, 0.45, q, p.coat);
+  batchHead.set(x, y+1.85, z, 0.55, 0.6, 0.55, q, p.skin);
+  if (p.hat) batchHat.set(x, y+2.28, z, p.topHat?0.5:0.62, p.topHat?0.65:0.3, p.topHat?0.5:0.62, q, C(0x1c1a18));
+  if (p.parasol) batchPar.set(x, y+2.75, z, 1.7, 0.16, 1.7, q, p.parasolCol);
+}
+function putHammer(p, t){
+  const swing = Math.abs(Math.sin(t*5.5 + p.phase));
+  const pitch = -0.4 - 1.25*swing;
+  const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, p.phase, pitch));
+  const dir = new THREE.Vector3(0,-1,0).applyQuaternion(q);
+  const sh = new THREE.Vector3(p.x + 0.45*Math.sin(p.phase), p.y+1.5, p.z + 0.45*Math.cos(p.phase));
+  D.arms.set(sh.x + dir.x*0.7, sh.y + dir.y*0.7, sh.z + dir.z*0.7, 0.22, 1.4, 0.22, q, C(0x3a3430));
+}
+
+function updateDynamics(t){
+  // camera: slow ~25 deg orbit + gentle push-in
+  const u = smooth(Math.min(1, t/DUR));
+  const ang = -0.6 + 0.4363*u;
+  const rad = lerp(100, 82, u), hgt = lerp(42, 33, u);
+  camera.position.set(Math.sin(ang)*rad, hgt, -8 + Math.cos(ang)*rad);
+  camera.lookAt(0, 26, -8);
+
+  for (const k of Object.keys(D)) D[k].clear();
+
+  // people
+  for (let i=0; i<people.length; i++){
+    const p = people[i];
+    putPerson(D.people, D.heads, D.hats, D.parasols, p, t, i);
+    if (p.kind==='rivet') putHammer(p, t);
+  }
+  // horse-drawn carts
+  for (const off of [0, 0.5]){
+    const c = cartState(t, off);
+    const bob = Math.abs(Math.sin(t*8+off*9))*0.08;
+    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, c.yaw, 0));
+    const L = (lx,ly,lz,sx,sy,sz,col)=>{ const v=new THREE.Vector3(lx,ly,lz).applyQuaternion(q); D.cart.set(c.x+v.x, bob+ly+v.y, c.z+v.z, sx,sy,sz, q, col); };
+    L(1.6, 1.15, 0, 1.9, 0.85, 0.7, C(0x5a4632));            // horse body
+    for (const [hx,hz] of [[2.2,0.25],[2.2,-0.25],[1.0,0.25],[1.0,-0.25]]) L(hx, 0.5, hz, 0.22, 1.0, 0.22, C(0x4a3826));
+    L(2.75, 1.5, 0, 0.55, 0.5, 0.45, C(0x5a4632));            // horse head
+    L(-0.6, 1.3, 0, 2.4, 0.35, 1.3, C(0x6b543a));            // cart bed
+    for (const [wx,wz] of [[-1.4,0.75],[-1.4,-0.75],[0.2,0.75],[0.2,-0.75]]) L(wx, 0.55, wz, 0.3, 1.1, 0.3, C(0x2a241e));
+    for (let i=0; i<3; i++) L(-1.2+i*0.8, 1.0, 0, 0.3, 0.3, 2.2, ironCol()); // iron load
+  }
+  // carriages crossing the bridge
+  for (const [dir, off] of [[1,0],[ -1,0.5]]){
+    const s = ((t*0.045*dir) + off) % 1;
+    const z = lerp(riverZ(8)-6.5, riverZ(8)+6.5, s<0?s+1:s);
+    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, 0));
+    D.carriage.set(8, 1.6, z, 1.4, 0.9, 2.4, q, C(0x3a2f2a));
+    D.carriage.set(8, 2.4, z, 1.5, 0.3, 2.5, q, C(0x1e1a16));
+    for (const wz of [-0.9, 0.9]){ D.carriage.set(7.4, 1.2, z+wz, 0.25, 0.8, 0.25, q, C(0x241f1a)); D.carriage.set(8.6, 1.2, z+wz, 0.25, 0.8, 0.25, q, C(0x241f1a)); }
+    D.carriage.set(8, 2.7, z+1.0, 0.5, 0.55, 0.5, q, C(0x1c1a18));  // driver
+  }
+  // riverboat
+  const boat = boatState(t);
+  {
+    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.sin(t*1.7)*0.03, boat.yaw, Math.sin(t*1.3)*0.04));
+    const bob = Math.sin(t*1.9)*0.08;
+    const L = (lx,ly,lz,sx,sy,sz,col)=>{ const v=new THREE.Vector3(lx,ly,lz).applyQuaternion(q); D.boat.set(boat.x+v.x, bob+ly+v.y, boat.z+v.z, sx,sy,sz, q, col); };
+    L(0, 0.6, 0, 8, 0.8, 2.2, C(0x3a2f28));       // hull
+    L(0, 1.2, 0, 6.6, 0.5, 1.8, C(0x46403a));
+    L(-1, 2.0, 0, 3.2, 1.6, 1.8, C(0xe8dcc0));    // cabin
+    L(-1, 3.1, 0, 3.4, 0.4, 2.0, C(0x6e7480));
+    L(2.4, 2.6, 0, 0.9, 2.6, 0.9, C(0x2a241e));   // funnel
+    for (let i=-3; i<=3; i+=2) L(i, 1.55, 0, 1, 0.25, 1.9, C(0xd8cba8));
+  }
+  // creeper cranes: jib rotating, girder swinging on a chain
+  for (const c of cranes){
+    const a = 0.7*Math.sin(t*0.45 + c.phase);
+    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, a, 0));
+    const tip = c.top.clone().add(new THREE.Vector3(Math.sin(a), 0, Math.cos(a)).multiplyScalar(c.jib));
+    const dir = new THREE.Vector3(Math.sin(a), 0, Math.cos(a));
+    const jq = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, a+Math.PI/2, 0));
+    D.crane.beam(c.top, tip, 0.35, ironCol());
+    const sw = 0.4*Math.sin(t*1.15 + c.phase*2);
+    const end = tip.clone().add(new THREE.Vector3(Math.sin(sw)*6, -6, Math.cos(sw)*6));
+    for (let i=1; i<=5; i++){
+      const k = i/5;
+      D.crane.set(lerp(tip.x,end.x,k), lerp(tip.y,end.y,k), lerp(tip.z,end.z,k), 0.12, 1.25, 0.12, null, C(0x2a241e));
+    }
+    D.crane.beam(end.clone().add(new THREE.Vector3(-3,0,0).applyQuaternion(jq)), end.clone().add(new THREE.Vector3(3,0,0).applyQuaternion(jq)), 0.5, ironCol());
+  }
+  // pigeons circling the tower
+  for (let i=0; i<14; i++){
+    const a = t*0.9 + i*(Math.PI*2/14);
+    const r = 18 + (i%5)*3.2;
+    const flap = 1 + 0.45*Math.sin(t*12 + i*2);
+    D.pigeon.set(TC.x + Math.cos(a)*r, 52 + Math.sin(t*1.3+i)*4 + (i%3)*6, TC.z + Math.sin(a)*r, 0.7, 0.32*flap, 0.55, null, C(0x3a3f4a));
+  }
+  // rivet sparks: deterministic flicker
+  for (let i=0; i<sparkPts.length; i++){
+    const h1 = hash01(i*7919 + Math.floor(t*16)*131);
+    if (h1 < 0.5){
+      const p = sparkPts[i];
+      const s = 0.25 + 0.5*hash01(i*131 + Math.floor(t*16)*17);
+      const col = C(0xffdd66).lerp(C(0xff5500), hash01(i*31+Math.floor(t*16)));
+      D.spark.set(p.x + (hash01(i+t*60)-0.5)*0.5, p.y + (hash01(i*3+t*60)-0.5)*0.5, p.z + (hash01(i*7+t*60)-0.5)*0.5, s, s, s, null, col);
+    }
+  }
+  // steam / smoke puffs
+  const srcs = [chimneyTop, boat.funnel];
+  for (let sIdx=0; sIdx<srcs.length; sIdx++){
+    const src = srcs[sIdx];
+    for (let k=0; k<8; k++){
+      const age = (t*0.22 + k/8 + sIdx*0.5) % 1;
+      const col = C(0xe2ddd6).lerp(C(0xa89a88), age);
+      D.smoke.set(src.x + age*7 + (hash01(k+sIdx)-0.5)*age*2, src.y + age*9, src.z + age*2 + (hash01(k*3+sIdx)-0.5)*age*2,
+                  0.9 + age*2.6, 0.9 + age*2.6, 0.9 + age*2.6, null, col);
+    }
+  }
+  for (const k of Object.keys(D)) D[k].finish();
+}
+
+/* ================= frame ================= */
+function renderAt(t){
+  t = Math.max(0, Math.min(DUR, t));
+  updateDynamics(t);
+  composer.render();
+}
+window.renderAt = renderAt;
+window.DURATION = DUR;
+
+buildIsland();
+buildYard();
+buildCity();
+buildTower();
+buildCranes();
+buildPeople();
+for (const k of Object.keys(B)) B[k].finish();
+
+const params = new URLSearchParams(location.search);
+if (params.has('t')){
+  renderAt(parseFloat(params.get('t')));
+} else {
+  const t0 = performance.now();
+  const loop = now => { renderAt(((now - t0)/1000) % DUR); requestAnimationFrame(loop); };
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
